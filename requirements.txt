@@ -1,0 +1,5 @@
+numpy>=1.22
+matplotlib>=3.5
+# PyTorch is optional; the DQN agent guards its import. A CPU wheel is
+# sufficient for the small Mini-2 environments.
+# torch>=2.0
