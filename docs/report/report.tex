@@ -3,7 +3,7 @@
 \usepackage{graphicx}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{bm}
-\usepackage{microtype}
+\usepackage[expansion=false]{microtype}
 \usepackage[hidelinks]{hyperref}
 \usepackage{cite}
 \usepackage{booktabs}
@@ -168,6 +168,64 @@ To satisfy the V2 deliverable we implement a pure-NumPy DQN agent~\cite{mnih2015
 \label{fig:dqn}
 \end{figure}
 
+\section{V3: Bayesian Hyperparameter Optimization on the NumPy DQN}\label{sec:v3}
+
+\subsection{Scope}
+The V3 prompt asks for whichever post-V2 class topic best fits the foundation environment of the repository. All three Mini-2 problems---Windy Chasm, the lidar-cone corridor, and the XOR circuit---are single-protagonist, fully observed, finite MDPs. The V3 brief states verbatim that ``an environment centered on a main protagonist does not necessarily benefit from swarm/coordination implementations, but very much benefits from Bayesian hyperparameter tuning,'' so the V3 effort here is a from-scratch Gaussian-process Bayesian-optimization (GP-BO) loop applied to the V2 NumPy DQN on Problem~1. POMDP wrappers, multi-agent extensions, and BO sweeps on Problems~2 and~3 were considered and rejected; the reasoning lives in \texttt{DECISIONS.md} at the repository root.
+
+\subsection{Method}
+Let $f(\theta) \in \mathbb{R}$ be the noisy evaluation return of a NumPy DQN trained for $E$ episodes on the Windy Chasm MDP, as a function of a hyperparameter vector $\theta = (\mathrm{lr}, \mathrm{batch\_size}, \epsilon_{\mathrm{decay}}, \mathrm{target\_sync})$. We model $f$ as a zero-mean Gaussian process with the RBF kernel $k(\theta,\theta') = \sigma_f^2 \exp\!\big(\!-\tfrac{1}{2\ell^{2}}\,\|\theta-\theta'\|^{2}\big)$~\cite{rasmussen2006}. After observing $n$ trials the posterior mean and variance at a query $\theta_\star$ are the standard expressions of~\cite{rasmussen2006}; we select the next sample by maximizing the Expected Improvement acquisition~\cite{mockus1989}
+\[
+\mathrm{EI}(\theta) = (\mu(\theta) - f^{\star} - \xi)\,\Phi(z) + \sigma(\theta)\,\phi(z),
+\quad z = \frac{\mu(\theta) - f^{\star} - \xi}{\sigma(\theta)},
+\]
+with $\xi = 0.01$ and $f^{\star}$ the running best. The pipeline runs on the unit cube $[0,1]^d$ with log-uniform or integer maps back to native domains; the initial design is a Latin-Hypercube sample~\cite{mckay1979}; the EI argmax is found by random search of unit-cube candidates (no scipy). Kernel hyperparameters use the median-pairwise-distance heuristic~\cite{garreau2018} and $\sigma_f^2 = \mathrm{Var}(y)$; type-II MLE on the kernel is unreliable below $\sim 25$ observations~\cite{snoek2012} and we sit in that regime. Tree-Parzen variants~\cite{bergstra2011} were considered and rejected because they lose the smooth posterior EI uses.
+
+\subsection{Two runs and a proxy mismatch}
+The objective wrapper exposes a single switch, \texttt{objective\_signal}, that selects the scalar BO maximizes. Two runs were executed under identical settings (4 LHS initial points, 12 EI iterations, 250 training episodes / 60 max steps per trial, identical seed):
+
+\begin{enumerate}\setlength\itemsep{1pt}
+  \item \texttt{tail\_mean}: mean return over the last 50 \emph{training} episodes. Cheap; integrates over many rollouts; but contaminated by exploration noise from the residual $\epsilon$.
+  \item \texttt{eval\_return\_start}: single greedy rollout from the start state at the end of training. One-rollout signal; reflects the policy the user actually deploys.
+\end{enumerate}
+
+The two rankings disagree (Table~\ref{tab:v3-bo}). The best-by-\texttt{tail\_mean} configuration gives a \emph{greedy} evaluation of $-63.28$, well below the V2 hand-tuned baseline of $-24$ and worse than several other configurations in the same sweep. The best-by-\texttt{eval\_return\_start} configuration gives $-12.20$, within one wind-stochastic rollout's variance of value iteration's $V^{\star} = -14.998$. This is exactly the proxy-misspecification warning that practical BO papers emphasize~\cite{snoek2012} --- the BO did its job and faithfully maximized the scalar it was given, but the first scalar was not the one we actually cared about.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lccc}
+\toprule
+Run & Objective signal & Best objective & Best greedy eval at start \\
+\midrule
+1 & \texttt{tail\_mean} (last 50 ep) & $-44.69$ & $-63.28$ (poor!) \\
+2 & \texttt{eval\_return\_start}     & $-12.20$ & $-12.20$ ($\approx V^{\star}$) \\
+\bottomrule
+\end{tabular}
+\caption{The two V3 BO sweeps differ only in the scalar maximized. The \texttt{tail\_mean} winner has a worse greedy policy than several other configs in the same sweep. Both logs are in \texttt{data/hpo/}.}
+\label{tab:v3-bo}
+\end{table}
+
+\subsection{Results}
+Figure~\ref{fig:v3-bo-history} plots the running-best curve for the \texttt{tail\_mean} run; Figure~\ref{fig:v3-bo-evalstart} does the same for \texttt{eval\_return\_start}. A second negative finding is visible in both panels: the running-best curve is flat after the LHS phase, that is, EI did not strictly improve on the four random LHS points. The 16-trial budget in a 4-D search space is exactly the regime~\cite{bergstra2012} characterise as ``random search competes with BO,'' and the residual DQN training-seed noise at 250 episodes per trial dominates the EI signal. The fix --- multiple seeds per trial, or multi-fidelity BO~\cite{klein2017} --- is logged in \texttt{DECISIONS.md} as the next-week experiment.
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.82\linewidth]{figures/fig_v3_bo_history.pdf}
+\caption{V3 BO run with the \texttt{tail\_mean} objective. Grey dots are per-trial objective; blue line is the running best. The dashed vertical line marks the end of the LHS initial design. EI did not improve on LHS.}
+\label{fig:v3-bo-history}
+\end{figure}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.82\linewidth]{figures/fig_v3_bo_evalstart.pdf}
+\caption{Identical sweep with the \texttt{eval\_return\_start} objective. The best trial gives a greedy rollout return of $-12.20$, within wind-noise of value iteration's $V^{\star} = -14.998$. EI again does not improve on LHS at this budget.}
+\label{fig:v3-bo-evalstart}
+\end{figure}
+
+\subsection{Why this is the right V3 addition}
+Three reasons, in the order they matter for this repository. \emph{First}, the V2 DQN baseline already lives or dies on its hand-tuned hyperparameters and the V2 report is honest about it (``lr $= 5\times 10^{-4}$ chosen by inspection''). V3 turns the implicit tuning into an explicit, reproducible BO log in \texttt{data/hpo/}. \emph{Second}, the BO framework is generic --- writing a \texttt{LidarShapingObjective} or a \texttt{CircuitGreedyObjective} satisfying the same \texttt{(params)} $\mapsto$ \texttt{(scalar, metrics)} contract is $\sim\!30$ LoC, so the V3 result generalises directly to Problems 2 and 3 in a follow-up. \emph{Third}, the V3 brief explicitly flags multi-agent and swarm work as the \emph{wrong} V3 addition for a single-protagonist environment, and all three Mini-2 problems are single-protagonist; doing BO is doing what V3 asked.
+
+\subsection{Limitations}
+The 16-trial budget is small; EI did not separate from LHS in either run. A budget of $\sim\!5$ seeds per trial would be the cheapest fix and is the recommended next step. The two BO sweeps used a single random-seed; reporting mean$\pm$std over multiple seeds (as in Mini-1's V3 figure) was skipped here because each DQN trial costs an order of magnitude more wall-clock than Mini-1's Q-learning trials and the comparison would have exceeded the V3 compute budget. \texttt{DECISIONS.md}~\S{}6 lists this and two further extensions as future work.
+
 \section{Conclusion}
 We extended our Mini-1 Markov-process hierarchy with a general MDP class and solved three environments that exercise stochastic dynamics (Windy Chasm), reward shaping (lidar cone), and combinatorial design (XOR circuit). Tabular DP solves each exactly; a NumPy DQN reproduces the Windy Chasm value under a model-free learning regime. The approximation scaling discussion in Section~\ref{sec:p1-challenge} and the complexity analysis in Section~\ref{sec:p3} both point to the same conclusion: tabular methods exhaust themselves on grids larger than $\sim\!10^{3}$ states, and function approximation is the principled exit strategy~\cite{bertsekas1996neuro,mnih2015human}.
 
@@ -237,6 +295,35 @@ A.~Mirhoseini \emph{et al.}, ``A graph placement methodology for fast chip desig
 \bibitem{bertsekas1996neuro}
 D.~P. Bertsekas and J.~N. Tsitsiklis, \emph{Neuro-Dynamic Programming}. Belmont, MA, USA: Athena Scientific, 1996.
 
+\bibitem{mockus1989}
+J.~Mockus, \emph{Bayesian Approach to Global Optimization: Theory and Applications}. Dordrecht: Kluwer Academic, 1989.
+
+\bibitem{snoek2012}
+J.~Snoek, H.~Larochelle, and R.~P. Adams, ``Practical Bayesian optimization of machine learning algorithms,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2012.
+
+\bibitem{frazier2018}
+P.~I. Frazier, ``A tutorial on Bayesian optimization,'' \emph{arXiv preprint arXiv:1807.02811}, 2018.
+
+\bibitem{rasmussen2006}
+C.~E. Rasmussen and C.~K.~I. Williams, \emph{Gaussian Processes for Machine Learning}. Cambridge, MA: MIT Press, 2006.
+
+\bibitem{bergstra2011}
+J.~Bergstra, R.~Bardenet, Y.~Bengio, and B.~K{\'e}gl, ``Algorithms for hyper-parameter optimization,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2011.
+
+\bibitem{bergstra2012}
+J.~Bergstra and Y.~Bengio, ``Random search for hyper-parameter optimization,'' \emph{Journal of Machine Learning Research}, vol.~13, pp.~281--305, 2012.
+
+\bibitem{mckay1979}
+M.~D. McKay, R.~J. Beckman, and W.~J. Conover, ``A comparison of three methods for selecting values of input variables in the analysis of output from a computer code,'' \emph{Technometrics}, vol.~21, no.~2, pp.~239--245, 1979.
+
+\bibitem{klein2017}
+A.~Klein, S.~Falkner, S.~Bartels, P.~Hennig, and F.~Hutter, ``Fast Bayesian optimization of machine learning hyperparameters on large datasets,'' in \emph{AISTATS}, 2017.
+
+\bibitem{garreau2018}
+D.~Garreau, W.~Jitkrittum, and M.~Kanagawa, ``Large sample analysis of the median heuristic,'' \emph{arXiv preprint arXiv:1707.07269}, 2018.
+
 \end{thebibliography}
+
+\end{document}
 
 \end{document}

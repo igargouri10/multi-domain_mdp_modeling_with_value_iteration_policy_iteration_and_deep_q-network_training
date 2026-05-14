@@ -72,3 +72,65 @@ Enumerating states for the circuit MDP by naively iterating over grid
 configurations wastes memory on unreachable configurations. We do a BFS
 from the start state instead, expanding children as we encounter them.
 This keeps the state count to 391 for the default spec.
+
+---
+
+## V3 additions: Bayesian hyperparameter optimization
+
+### N+1. Proxy mismatch between `tail_mean` and `eval_return_start`
+
+**Problem.** The first V3 BO sweep maximized the trailing-window mean of
+training returns (`tail_mean`, last 50 episodes). The "best" config
+returned `tail_mean = -44.69` but its greedy policy from the start state
+gave `eval_return_start = -63.28`, worse than the V2 hand-tuned baseline.
+Meanwhile a *different* config in the same sweep gave
+`eval_return_start = -10.20` while only ranking 5th by tail_mean.
+
+**Cause.** The trailing-window mean averages over noisy ε-greedy
+rollouts: a config with a high residual ε keeps exploring late in
+training, which boosts the worst-case return floor but does not reflect
+the *greedy* policy quality the user actually cares about.
+
+**Fix.** Added an `objective_signal` knob to `DQNWindyChasmObjective`
+(`"tail_mean"` vs `"eval_return_start"`) and re-ran the sweep with the
+direct greedy-eval signal. The second run found a config with
+`eval_return_start = -12.20`, within one wind-stochastic rollout's
+variance of value iteration's `V* = -14.998`. Both runs are kept in the
+report so the proxy mismatch stays visible.
+
+### N+2. EI did not separate from LHS at this trial budget
+
+**Problem.** In both BO sweeps the best-by-objective trial came from
+the four initial Latin-Hypercube points, not from the twelve EI
+iterations. The running-best curve is flat after the LHS phase.
+
+**Cause.** DQN training-seed noise at 250 episodes per trial swamps EI's
+signal at 16 trials in a 4-D search space — exactly the regime where
+random search competes with BO (Bergstra & Bengio 2012).
+
+**Fix planned, not executed.** Either (a) lift trials per config to
+multiple seeds and use the seed-mean as the BO objective, or (b) adopt
+multi-fidelity BO (Klein et al. 2017). Both are documented in
+`DECISIONS.md` §6 as next-week work. Cost-wise (a) is the cheapest
+improvement and is the recommended next step.
+
+### N+3. GP Cholesky breakdown at small training sets
+
+**Problem.** With ~4 LHS points the kernel matrix `K + σ_n² I` is small
+and its conditioning depends on the heuristic length-scale. A near-
+duplicate LHS sample once produced `LinAlgError` in `numpy.linalg.cholesky`.
+
+**Fix.** `hpo/gp.py` retries the factorisation with progressively larger
+jitter (R&W 2006, §5.4.2): start at the configured `noise_var`, double
+the jitter each retry, cap at six tries. The second attempt always
+succeeds in practice.
+
+### N+4. No `scipy.stats.norm` → hand-rolled standard-normal Φ / φ
+
+**Problem.** Expected Improvement needs `Φ(z)` and `φ(z)`. Adding
+`scipy.stats` for one function re-breaks the no-extra-deps story
+established in V2 (the NumPy DQN explicitly avoided scipy and torch).
+
+**Fix.** `hpo/optimizer.py` uses `math.erf` (stdlib) for the CDF and
+computes `φ(z) = e^{-z²/2} / √(2π)` directly. A unit test asserts
+`EI = 0` when `σ = 0` and `EI > 0` strictly above the incumbent.

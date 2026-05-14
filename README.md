@@ -16,7 +16,10 @@ Markov Decision Process (MDP) class, and solves the three problems from
    for the `4 × 4` case.
 
 The V2 deliverable is a pure-NumPy DQN agent (Mnih *et al.*, 2015) trained
-on Problem 1.
+on Problem 1. The **V3** deliverable is a from-scratch Gaussian-process
+Bayesian-optimization loop (Mockus 1989; Snoek *et al.*, 2012) that tunes
+that DQN's hyperparameters on the Problem 1 MDP. See `DECISIONS.md` at
+the repo root for the V3 implemented-vs-skipped justification.
 
 ## Layout
 
@@ -28,13 +31,17 @@ mini2_rl_repo/
 │   ├── agents/             # numpy DQN (+ optional torch DQN)
 │   ├── buffers/            # replay buffer
 │   ├── nn/                 # MLP architectures (torch path)
+│   ├── hpo/                # V3: GP-BO with Expected Improvement
 │   └── experiments/        # end-to-end figure/JSON driver
+├── scripts/
+│   └── bayesian_hpo.py     # V3: BO CLI for the NumPy DQN
 ├── docs/
 │   ├── report/             # LaTeX source + compiled PDF
 │   ├── notes/              # project log
 │   └── technical-challenges.md
-├── data/                   # results.json (numerical outputs)
-├── tests/                  # (add pytest smoke tests here)
+├── DECISIONS.md            # V3 transparency: what was/wasn't done
+├── data/                   # results.json + V3 hpo/ trial logs
+├── tests/                  # smoke + V3 BO unit tests
 └── requirements.txt
 ```
 
@@ -77,3 +84,50 @@ cd docs/report && pdflatex report.tex && pdflatex report.tex
 | DQN on Windy Chasm | 97 | — | — | −24 (last 50 ep MA); VI target −14.998 |
 
 Values come from a single run of `run_all.py`.
+
+## V3: Bayesian hyperparameter optimization
+
+V3 adds a from-scratch Gaussian-process Bayesian-optimization loop
+(`src/mini2_rl/hpo/`) that tunes the V2 NumPy DQN on Problem 1. The
+rationale, in one sentence: V3 flags Bayesian HPO as the right tool
+for a single-protagonist environment, all three Mini-2 problems are
+single-protagonist, so this is where the V3 effort goes. The full
+reasoning, including the post-V2 topics I considered and rejected
+(POMDPs, multi-agent, more BO sweeps), is in `DECISIONS.md`.
+
+Two BO sweeps were run, differing only in the scalar BO maximizes:
+
+| Run | Signal | Best objective | Best greedy-eval-at-start |
+|---|---|---|---|
+| 1 | `tail_mean` (last 50 train episodes) | −44.69 | −63.28 (poor!) |
+| 2 | `eval_return_start` (greedy from start) | −12.20 | −12.20 (≈ optimal) |
+
+The two rankings disagree — the "best" config under `tail_mean` has
+a *worse* greedy policy than several other configs in the same sweep.
+This proxy mismatch is the headline finding and is discussed in the
+V3 section of `docs/report/report.pdf` and in `DECISIONS.md`.
+
+Reproduce either run:
+
+```bash
+PYTHONPATH=src python scripts/bayesian_hpo.py \
+    --n-init 4 --n-iter 12 --episodes 250 --max-steps 60 \
+    --objective-signal eval_return_start \
+    --log data/hpo/dqn_windy_chasm_evalstart.json \
+    --fig docs/report/figures/fig_v3_bo_evalstart.pdf
+```
+
+References for the BO methodology (Mockus 1989; Snoek, Larochelle &
+Adams 2012; Frazier 2018; Rasmussen & Williams 2006; Bergstra &
+Bengio 2012; Bergstra et al. 2011) are in
+`docs/report/references.bib`.
+
+## Author and collaborations
+
+* Author: Ismail Gargouri (`igargouri1@gmail.com`).
+* No human collaborators on any part of this repository.
+* No pre-existing RL frameworks (Stable-Baselines3, RLlib, CleanRL,
+  Optuna, scikit-optimize) were used; the DQN and the BO loop are
+  written from scratch.
+* Third-party libraries: NumPy, Matplotlib, optionally PyTorch.
+  Versions pinned in `requirements.txt`.
